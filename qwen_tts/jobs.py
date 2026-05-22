@@ -15,6 +15,7 @@ class Job:
     message: str
     output_path: str | None = None
     error: str | None = None
+    progress_bytes: int | None = None
 
 
 class JobManager:
@@ -38,6 +39,25 @@ class JobManager:
     def create_clone_job(self, worker: Callable[[], object]) -> Job:
         return self.create_generation_job(worker)
 
+    def create_download_job(self, worker: Callable[[Callable[[int], None]], object]) -> Job:
+        with self._lock:
+            if self._active_job_id is not None:
+                raise JobBusyError("Another job is already running.")
+            job = Job(
+                job_id=str(uuid.uuid4()),
+                status="queued",
+                message="Queued",
+                progress_bytes=0,
+            )
+            self._jobs[job.job_id] = job
+            self._active_job_id = job.job_id
+
+        thread = threading.Thread(
+            target=self._run_download_job, args=(job.job_id, worker), daemon=True
+        )
+        thread.start()
+        return job
+
     def _run_job(self, job_id: str, worker: Callable[[], object]) -> None:
         self._update(job_id, status="running", message="Loading model and generating audio")
         try:
@@ -46,6 +66,32 @@ class JobManager:
             self._update(job_id, status="succeeded", message="Audio generated", output_path=output_path)
         except Exception as exc:
             self._update(job_id, status="failed", message="Generation failed", error=str(exc))
+        finally:
+            with self._lock:
+                if self._active_job_id == job_id:
+                    self._active_job_id = None
+
+    def _run_download_job(
+        self,
+        job_id: str,
+        worker: Callable[[Callable[[int], None]], object],
+    ) -> None:
+        self._update(job_id, status="running", message="Downloading model")
+
+        def report(bytes_: int) -> None:
+            self._update(job_id, progress_bytes=bytes_)
+
+        try:
+            result = worker(report)
+            output_path = str(result) if result is not None else None
+            self._update(
+                job_id,
+                status="succeeded",
+                message="Download complete",
+                output_path=output_path,
+            )
+        except Exception as exc:
+            self._update(job_id, status="failed", message="Download failed", error=str(exc))
         finally:
             with self._lock:
                 if self._active_job_id == job_id:

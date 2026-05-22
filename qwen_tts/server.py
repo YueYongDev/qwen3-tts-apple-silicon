@@ -8,6 +8,7 @@ from . import __version__
 from .audio import ffmpeg_available
 from .config import configure_data_dir, get_config
 from .constants import DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT
+from .downloads import delete_model, download_model
 from .errors import JobBusyError, QwenTTSError
 from .generation import generate_clone, generate_design, list_outputs
 from .jobs import JobManager
@@ -142,6 +143,28 @@ def get_job(job_id: str) -> dict:
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     return job_manager.to_dict(job)
+
+
+@app.post("/models/{model_id}/download")
+def start_model_download(model_id: str) -> dict:
+    try:
+        job = job_manager.create_download_job(
+            lambda report: download_model(model_id, on_progress=report)
+        )
+        return job_manager.to_dict(job)
+    except JobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        raise _http_error(exc)
+
+
+@app.delete("/models/{model_id}")
+def delete_model_endpoint(model_id: str) -> dict:
+    try:
+        removed = delete_model(model_id)
+        return {"ok": True, "removed": removed}
+    except Exception as exc:
+        raise _http_error(exc)
 
 
 @app.get("/outputs")
