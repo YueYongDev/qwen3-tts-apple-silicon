@@ -16,6 +16,8 @@ class Job:
     output_path: str | None = None
     error: str | None = None
     progress_bytes: int | None = None
+    model_id: str | None = None
+    cancelled: bool = False
 
 
 class JobManager:
@@ -39,7 +41,11 @@ class JobManager:
     def create_clone_job(self, worker: Callable[[], object]) -> Job:
         return self.create_generation_job(worker)
 
-    def create_download_job(self, worker: Callable[[Callable[[int], None]], object]) -> Job:
+    def create_download_job(
+        self,
+        worker: Callable[[Callable[[int], None]], object],
+        model_id: str | None = None,
+    ) -> Job:
         with self._lock:
             if self._active_job_id is not None:
                 raise JobBusyError("Another job is already running.")
@@ -48,6 +54,7 @@ class JobManager:
                 status="queued",
                 message="Queued",
                 progress_bytes=0,
+                model_id=model_id,
             )
             self._jobs[job.job_id] = job
             self._active_job_id = job.job_id
@@ -57,6 +64,21 @@ class JobManager:
         )
         thread.start()
         return job
+
+    def cancel(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return False
+            if job.status not in {"queued", "running"}:
+                return False
+            job.cancelled = True
+            return True
+
+    def is_cancelled(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            return bool(job and job.cancelled)
 
     def _run_job(self, job_id: str, worker: Callable[[], object]) -> None:
         self._update(job_id, status="running", message="Loading model and generating audio")
@@ -83,15 +105,21 @@ class JobManager:
 
         try:
             result = worker(report)
-            output_path = str(result) if result is not None else None
-            self._update(
-                job_id,
-                status="succeeded",
-                message="Download complete",
-                output_path=output_path,
-            )
+            if self.is_cancelled(job_id):
+                self._update(job_id, status="cancelled", message="Download cancelled")
+            else:
+                output_path = str(result) if result is not None else None
+                self._update(
+                    job_id,
+                    status="succeeded",
+                    message="Download complete",
+                    output_path=output_path,
+                )
         except Exception as exc:
-            self._update(job_id, status="failed", message="Download failed", error=str(exc))
+            if self.is_cancelled(job_id):
+                self._update(job_id, status="cancelled", message="Download cancelled")
+            else:
+                self._update(job_id, status="failed", message="Download failed", error=str(exc))
         finally:
             with self._lock:
                 if self._active_job_id == job_id:

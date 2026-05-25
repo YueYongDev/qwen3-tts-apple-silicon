@@ -149,13 +149,33 @@ def get_job(job_id: str) -> dict:
 def start_model_download(model_id: str) -> dict:
     try:
         job = job_manager.create_download_job(
-            lambda report: download_model(model_id, on_progress=report)
+            lambda report: download_model(model_id, on_progress=report),
+            model_id=model_id,
         )
         return job_manager.to_dict(job)
     except JobBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except Exception as exc:
         raise _http_error(exc)
+
+
+@app.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str) -> dict:
+    job = job_manager.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.status not in {"queued", "running"}:
+        return {"ok": True, "already_done": True}
+
+    job_manager.cancel(job_id)
+
+    if job.model_id:
+        try:
+            delete_model(job.model_id)
+        except Exception:
+            pass
+
+    return {"ok": True}
 
 
 @app.delete("/models/{model_id}")
